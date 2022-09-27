@@ -21,6 +21,7 @@ using regex_parser_tests::vec;
 using wr22::regex_parser::parser::parse_regex;
 using wr22::regex_parser::parser::errors::ExpectedEnd;
 using wr22::regex_parser::parser::errors::InvalidRange;
+using wr22::regex_parser::parser::errors::TooStronglyNested;
 using wr22::regex_parser::parser::errors::UnexpectedChar;
 using wr22::regex_parser::parser::errors::UnexpectedEnd;
 using wr22::regex_parser::regex::CharacterClassData;
@@ -159,7 +160,8 @@ TEST_CASE("Groups", "[regex]") {
     CHECK_THROWS_MATCHES(
         parse_regex(U"(a"),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 2; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 2 && e.needs_closing() == U')'; }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"(?a)"),
         UnexpectedChar,
@@ -181,18 +183,25 @@ TEST_CASE("Groups", "[regex]") {
     CHECK_THROWS_MATCHES(
         parse_regex(U"(?'a)"),
         UnexpectedChar,
-        Predicate<UnexpectedChar>(
-            [](const auto& e) { return e.position() == 4 && e.char_got() == U')'; }));
+        Predicate<UnexpectedChar>([](const auto& e) {
+            return e.position() == 4 && e.char_got() == U')' && e.needs_closing() == U'\'';
+        }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"(?<a)"),
         UnexpectedChar,
-        Predicate<UnexpectedChar>(
-            [](const auto& e) { return e.position() == 4 && e.char_got() == U')'; }));
+        Predicate<UnexpectedChar>([](const auto& e) {
+            return e.position() == 4 && e.char_got() == U')' && e.needs_closing() == U'>';
+        }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"(?>)"),
         UnexpectedChar,
         Predicate<UnexpectedChar>(
             [](const auto& e) { return e.position() == 2 && e.char_got() == U'>'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"(?P<name"),
+        UnexpectedEnd,
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 8 && e.needs_closing() == U'>'; }));
 }
 
 TEST_CASE("Groups with alternatives", "[regex]") {
@@ -855,23 +864,28 @@ TEST_CASE("Character classes") {
     CHECK_THROWS_MATCHES(
         parse_regex(U"["),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 1; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 1 && e.needs_closing() == U']'; }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"[]"),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 2; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 2 && e.needs_closing() == U']'; }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"[-"),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 2; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 2 && e.needs_closing() == U']'; }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"[abc"),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 4; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 4 && e.needs_closing() == U']'; }));
     CHECK_THROWS_MATCHES(
         parse_regex(U"[abc"),
         UnexpectedEnd,
-        Predicate<UnexpectedEnd>([](const auto& e) { return e.position() == 4; }));
+        Predicate<UnexpectedEnd>(
+            [](const auto& e) { return e.position() == 4 && e.needs_closing() == U']'; }));
 }
 
 TEST_CASE("Character classes as atoms", "[regex]") {
@@ -920,4 +934,53 @@ TEST_CASE("Invalid character ranges", "[regex]") {
             return e.span() == Span::make_with_length(1, 3) && e.first() == U'z'
                 && e.last() == U'a';
         }));
+}
+
+TEST_CASE("Quantifiers before any atom", "[regex]") {
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"*abc"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 0 && e.char_got() == U'*'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"+abc"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 0 && e.char_got() == U'+'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"?abc"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 0 && e.char_got() == U'?'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"(*)"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 1 && e.char_got() == U'*'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"(?:*)"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 3 && e.char_got() == U'*'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"foo|*bar"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 4 && e.char_got() == U'*'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"*foo|bar"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 0 && e.char_got() == U'*'; }));
+    CHECK_THROWS_MATCHES(
+        parse_regex(U"*[a]"),
+        UnexpectedChar,
+        Predicate<UnexpectedChar>(
+            [](const auto& e) { return e.position() == 0 && e.char_got() == U'*'; }));
+}
+
+TEST_CASE("Excess nesting is detected", "[regex]") {
+    CHECK_THROWS_AS(
+        parse_regex(U"(((((((((((((((((((((((((((((((((((((((((((((("),
+        TooStronglyNested);
 }

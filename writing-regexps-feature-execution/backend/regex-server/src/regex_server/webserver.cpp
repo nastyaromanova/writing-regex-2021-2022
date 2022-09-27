@@ -1,7 +1,11 @@
 // wr22
-#include <nlohmann/json_fwd.hpp>
+#include <wr22/regex_executor/executor.hpp>
+#include <wr22/regex_executor/regex.hpp>
+#include <wr22/regex_explainer/explanation/explanation.hpp>
+#include <wr22/regex_explainer/hints/hint.hpp>
 #include <wr22/regex_parser/parser/errors.hpp>
 #include <wr22/regex_parser/parser/regex.hpp>
+#include <wr22/regex_parser/regex/part.hpp>
 #include <wr22/regex_server/service_error.hpp>
 #include <wr22/regex_server/service_error/internal_error.hpp>
 #include <wr22/regex_server/service_error/invalid_request_json.hpp>
@@ -14,6 +18,7 @@
 // stl
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 // crow
@@ -71,46 +76,74 @@ namespace {
         };
     }
 
-    nlohmann::json parse_regex_to_json(const std::u32string_view& regex) {
+    struct ParseSuccess {
+        regex_parser::regex::SpannedPart part;
+    };
+    struct ParseFailure {
+        nlohmann::json parse_error;
+    };
+
+    utils::Adt<ParseSuccess, ParseFailure> parse_regex(std::u32string_view regex) {
         namespace err = wr22::regex_parser::parser::errors;
 
         auto error_code = "";
         auto error_data = nlohmann::json::object();
         try {
-            auto parse_tree = wr22::regex_parser::parser::parse_regex(regex);
-            auto data_json = nlohmann::json::object();
-            data_json["parse_tree"] = nlohmann::json(parse_tree);
-            return data_json;
+            return ParseSuccess{wr22::regex_parser::parser::parse_regex(regex)};
         } catch (const err::ExpectedEnd& e) {
             error_code = "expected_end";
             error_data["position"] = e.position();
             error_data["char_got"] = wr22::unicode::to_utf8(e.char_got());
+            error_data["hint"] = regex_explainer::hints::get_hint(e);
         } catch (const err::UnexpectedChar& e) {
             error_code = "unexpected_char";
             error_data["position"] = e.position();
             error_data["char_got"] = wr22::unicode::to_utf8(e.char_got());
             error_data["expected"] = e.expected();
+            error_data["hint"] = regex_explainer::hints::get_hint(e);
+            if (auto c = e.needs_closing(); c.has_value()) {
+                error_data["needs_closing"] = wr22::unicode::to_utf8(c.value());
+            }
         } catch (const err::UnexpectedEnd& e) {
             error_code = "unexpected_end";
             error_data["position"] = e.position();
             error_data["expected"] = e.expected();
+            error_data["hint"] = regex_explainer::hints::get_hint(e);
+            if (auto c = e.needs_closing(); c.has_value()) {
+                error_data["needs_closing"] = wr22::unicode::to_utf8(c.value());
+            }
         } catch (const err::InvalidRange& e) {
             error_code = "invalid_range";
             error_data["span"] = e.span();
             error_data["first"] = wr22::unicode::to_utf8(e.first());
             error_data["last"] = wr22::unicode::to_utf8(e.last());
+            error_data["hint"] = regex_explainer::hints::get_hint(e);
+        } catch (const err::TooStronglyNested&) {
+            error_code = "too_strongly_nested";
         } catch (const err::ParseError& e) {
             throw std::runtime_error(fmt::format("Unknown parse error: {}", e.what()));
         }
-
         // If here, an error has occurred.
         auto parse_error_json = nlohmann::json::object();
         parse_error_json["code"] = error_code;
-        parse_error_json["data"] = error_data;
+        parse_error_json["data"] = std::move(error_data);
 
-        auto data_json = nlohmann::json::object();
-        data_json["parse_error"] = std::move(parse_error_json);
-        return data_json;
+        return ParseFailure{std::move(parse_error_json)};
+    }
+
+    nlohmann::json parse_regex_to_json(const std::u32string_view& regex) {
+        return std::move(parse_regex(regex))
+            .visit(
+                [](const ParseSuccess& success) -> nlohmann::json {
+                    auto data_json = nlohmann::json::object();
+                    data_json["parse_tree"] = success.part;
+                    return data_json;
+                },
+                [](ParseFailure failure) -> nlohmann::json {
+                    auto data_json = nlohmann::json::object();
+                    data_json["parse_error"] = std::move(failure.parse_error);
+                    return data_json;
+                });
     }
 
     std::u32string decode_string(const std::string& string) {
@@ -146,6 +179,8 @@ namespace {
 Webserver::Webserver() {
     CROW_ROUTE(m_app, "/parse")
         .methods(crow::HTTPMethod::POST)(handle_errors_in(*this, &Webserver::parse_handler));
+    CROW_ROUTE(m_app, "/explain")
+        .methods(crow::HTTPMethod::POST)(handle_errors_in(*this, &Webserver::explain_handler));
     CROW_ROUTE(m_app, "/match")
         .methods(crow::HTTPMethod::POST)(handle_errors_in(*this, &Webserver::match_handler));
 }
@@ -170,82 +205,86 @@ nlohmann::json Webserver::match_handler(const crow::request& request, crow::resp
         throw service_error::InvalidRequestJson{};
     }
 
-    auto regex = decode_json_string(json_at(request_json, "regex"));
+    auto regex_string = decode_json_string(json_at(request_json, "regex"));
     auto json_strings = json_at(request_json, "strings");
     if (!json_strings.is_array()) {
         throw service_error::InvalidRequestJson{};
     }
 
-    // STUB.
-    if (regex != U"[a-z]*(.)(?P<bar>0)") {
-        throw service_error::NotImplemented{};
+    // TODO: handle parse errors.
+    return parse_regex(regex_string)
+        .visit(
+            [&](ParseSuccess& success) {
+                auto root_part = std::move(success.part);
+                auto regex = regex_executor::Regex(std::move(root_part));
+                auto response_json = nlohmann::json::object();
+                auto& match_results = response_json["match_results"];
+                match_results = nlohmann::json::array();
+                auto executor = regex_executor::Executor(regex);
+
+                for (const auto& json_string_spec : json_strings) {
+                    auto string = decode_json_string(json_at(json_string_spec, "string"));
+                    auto fragment_string = extract_json_string(
+                        json_at(json_string_spec, "fragment"));
+                    if (fragment_string != "whole") {
+                        // STUB.
+                        throw service_error::NotImplemented{};
+                    }
+
+                    auto result = executor.execute(string);
+                    match_results.push_back(std::move(result));
+                }
+                return response_json;
+            },
+            [](ParseFailure& failure) {
+                auto response_json = nlohmann::json::object();
+                response_json["parse_error"] = std::move(failure.parse_error);
+                return response_json;
+            });
+}
+
+nlohmann::json Webserver::explain_handler(
+    [[maybe_unused]] const crow::request& request,
+    crow::response& response) {
+    const auto request_json = nlohmann::json::parse(request.body, nullptr, false);
+    if (request_json.is_discarded()) {
+        throw service_error::InvalidRequestJson{};
     }
 
-    auto response_json = nlohmann::json::object();
-    auto& match_results = response_json["match_results"];
-    match_results = nlohmann::json::array();
-
-    // STUB.
-    for (const auto& json_string_spec : json_strings) {
-        auto string = decode_json_string(json_at(json_string_spec, "string"));
-        auto fragment_string = extract_json_string(json_at(json_string_spec, "fragment"));
-        if (fragment_string != "whole") {
-            throw service_error::NotImplemented{};
-        }
-
-        if (string == U"foo0") {
-            match_results.push_back(nlohmann::json::parse(
-                "{\"matched\":true,\"match_groups\":{\"whole\":{\"text\":\"foo0\",\"span\":[0,4]"
-                "},\"by_index\":{\"1\":{\"text\":\"o\",\"span\":[2,3]}},\"by_name\":{\"bar\":{"
-                "\"text\":\"0\",\"span\":[3,4]}}},\"algorithm\":\"backtracking\",\"steps\":[{"
-                "\"type\":\"match_star\",\"regex_span\":[0,6],\"string_pos\":0},{\"type\":"
-                "\"match_char_class\",\"regex_span\":[0,5],\"success\":true,\"string_span\":[0,"
-                "1]},{\"type\":\"match_char_class\",\"regex_span\":[0,5],\"success\":true,"
-                "\"string_span\":[1,2]},{\"type\":\"match_char_class\",\"regex_span\":[0,5],"
-                "\"success\":true,\"string_span\":[2,3]},{\"type\":\"match_char_class\",\"regex_"
-                "span\":[0,5],\"string_pos\":3,\"success\":false,\"failure_reason\":{\"code\":"
-                "\"excluded_char\"}},{\"type\":\"finish_star\",\"string_span\":[0,3],\"num_"
-                "repetitions\":3,\"success\":true},{\"type\":\"begin_group\",\"capture\":{"
-                "\"type\":\"index\",\"index\":1},\"string_pos\":3,\"regex_span\":[6,9]},{"
-                "\"type\":\"match_wildcard\",\"regex_span\":[7,8],\"success\":true,\"string_"
-                "span\":[3,4]},{\"type\":\"end_group\",\"string_pos\":4},{\"type\":\"begin_"
-                "group\",\"capture\":{\"type\":\"name\",\"name\":\"bar\"},\"string_pos\":4,"
-                "\"regex_span\":[9,19]},{\"type\":\"match_literal\",\"literal\":\"0\",\"regex_"
-                "span\":[17,18],\"string_pos\":4,\"success\":false,\"failure_reason\":{\"code\":"
-                "\"end_of_string\"}},{\"type\":\"backtrack\",\"origin\":{\"step\":0},"
-                "\"reconsidered_decision\":{\"step\":4},\"continue_after_step\":3,\"string_"
-                "pos\":2},{\"type\":\"finish_star\",\"string_span\":[0,2],\"num_repetitions\":2,"
-                "\"success\":true},{\"type\":\"begin_group\",\"capture\":{\"type\":\"index\","
-                "\"index\":1},\"string_pos\":2,\"regex_span\":[6,9]},{\"type\":\"match_"
-                "wildcard\",\"regex_span\":[7,8],\"success\":true,\"string_span\":[2,3]},{"
-                "\"type\":\"end_group\",\"string_pos\":3},{\"type\":\"begin_group\",\"capture\":"
-                "{\"type\":\"name\",\"name\":\"bar\"},\"string_pos\":3,\"regex_span\":[9,19]},{"
-                "\"type\":\"match_literal\",\"literal\":\"0\",\"regex_span\":[17,18],\"string_"
-                "span\":[3,4],\"success\":true},{\"type\":\"end_group\",\"string_pos\":4},{"
-                "\"type\":\"end\",\"string_pos\":4,\"success\":true}]}"));
-        } else if (string == U"7") {
-            match_results.push_back(nlohmann::json::parse(
-                "{\"matched\":false,\"algorithm\":\"backtracking\",\"steps\":[{\"type\":\"match_"
-                "star\",\"regex_span\":[0,6],\"string_pos\":0},{\"type\":\"match_char_class\","
-                "\"regex_span\":[0,5],\"string_pos\":0,\"success\":false,\"failure_reason\":{"
-                "\"code\":\"excluded_char\"}},{\"type\":\"finish_star\",\"string_span\":[0,0],"
-                "\"num_repetitions\":0,\"success\":true},{\"type\":\"begin_group\",\"capture\":{"
-                "\"type\":\"index\",\"index\":1},\"string_pos\":0,\"regex_span\":[6,9]},{\"type\":"
-                "\"match_wildcard\",\"regex_span\":[7,8],\"success\":true,\"string_span\":[0,1]},{"
-                "\"type\":\"end_group\",\"string_pos\":1},{\"type\":\"begin_group\",\"capture\":{"
-                "\"type\":\"name\",\"name\":\"bar\"},\"string_pos\":1,\"regex_span\":[9,19]},{"
-                "\"type\":\"match_literal\",\"literal\":\"0\",\"regex_span\":[17,18],\"string_"
-                "pos\":1,\"success\":false,\"failure_reason\":{\"code\":\"end_of_string\"}},{"
-                "\"type\":\"backtrack\",\"origin\":{\"step\":0},\"reconsidered_decision\":{"
-                "\"step\":2},\"continue_after_step\":0,\"string_pos\":0},{\"type\":\"finish_star\","
-                "\"success\":false,\"failure_reason\":{\"code\":\"options_exhausted\"},\"string_"
-                "pos\":0},{\"type\":\"end\",\"string_pos\":0,\"success\":false}]}"));
-        } else {
-            throw service_error::NotImplemented{};
-        }
+    if (!request_json.is_object()) {
+        throw service_error::InvalidRequestJsonStructure{};
     }
 
-    return response_json;
+    if (auto it = request_json.find("regex"); it != request_json.end()) {
+        const auto& regex_json_string = *it;
+        if (!regex_json_string.is_string()) {
+            throw service_error::InvalidRequestJsonStructure{};
+        }
+
+        auto regex_string = regex_json_string.get<std::string>();
+        try {
+            auto regex_string_utf32 = wr22::unicode::from_utf8(regex_string);
+            return parse_regex(regex_string_utf32)
+                .visit(
+                    [](const ParseSuccess& success) {
+                        const auto& root_part = success.part;
+                        auto full_explanation = wr22::regex_explainer::explanation::
+                            get_full_explanation(root_part);
+                        auto response_json = nlohmann::json::object();
+                        response_json["explanation"] = full_explanation;
+                        return response_json;
+                    },
+                    [](ParseFailure failure) {
+                        auto response_json = nlohmann::json::object();
+                        response_json["parse_error"] = std::move(failure.parse_error);
+                        return response_json;
+                    });
+        } catch (const boost::locale::conv::conversion_error& e) {
+            throw service_error::InvalidUtf8{};
+        }
+    } else {
+        throw service_error::InvalidRequestJsonStructure{};
+    }
 }
 
 }  // namespace wr22::regex_server

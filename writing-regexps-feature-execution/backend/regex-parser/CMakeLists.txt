@@ -18,8 +18,9 @@ target_compile_options(
 target_link_libraries(
     wr22-regex-parser
     PUBLIC
-        fmt
+        ${FMT_TARGET}
         wr22-unicode
+        wr22-utils
 )
 
 if (${REGEX_PARSER_BUILD_TESTS})

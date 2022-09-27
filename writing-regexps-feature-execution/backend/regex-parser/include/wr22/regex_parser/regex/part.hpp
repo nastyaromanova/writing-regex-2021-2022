@@ -1,12 +1,12 @@
 #pragma once
 
 // wr22
-// #include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json_fwd.hpp>
 #include <wr22/regex_parser/regex/capture.hpp>
 #include <wr22/regex_parser/regex/character_class_data.hpp>
 #include <wr22/regex_parser/span/span.hpp>
-#include <wr22/regex_parser/utils/adt.hpp>
-#include <wr22/regex_parser/utils/box.hpp>
+#include <wr22/utils/adt.hpp>
+#include <wr22/utils/box.hpp>
 
 // stl
 #include <iosfwd>
@@ -14,7 +14,7 @@
 #include <vector>
 
 // nlohmann
-// #include <nlohmann/json.hpp>
+#include <nlohmann/json.hpp>
 
 namespace wr22::regex_parser::regex {
 
@@ -35,7 +35,7 @@ namespace part {
         bool operator==(const Empty& rhs) const = default;
         static constexpr const char* code_name = "empty";
     };
-    // void to_json(nlohmann::json& j, const Empty& part);
+    void to_json(nlohmann::json& j, const Empty& part);
 
     /// An regex part that matches a single character literally.
     ///
@@ -48,7 +48,7 @@ namespace part {
 
         char32_t character;
     };
-    // void to_json(nlohmann::json& j, const Literal& part);
+    void to_json(nlohmann::json& j, const Literal& part);
 
     /// A regex part with the list of alternatives to be matched.
     ///
@@ -66,7 +66,7 @@ namespace part {
         /// The list of the alternatives.
         std::vector<SpannedPart> alternatives;
     };
-    // void to_json(nlohmann::json& j, const Alternatives& part);
+    void to_json(nlohmann::json& j, const Alternatives& part);
 
     /// A regex part with the list of items to be matched one after another.
     ///
@@ -81,7 +81,7 @@ namespace part {
         /// The list of the subexpressions.
         std::vector<SpannedPart> items;
     };
-    // void to_json(nlohmann::json& j, const Sequence& part);
+    void to_json(nlohmann::json& j, const Sequence& part);
 
     /// A regex part that represents a group in parentheses.
     ///
@@ -104,7 +104,7 @@ namespace part {
         /// The smart pointer to the group contents.
         utils::Box<SpannedPart> inner;
     };
-    // void to_json(nlohmann::json& j, const Group& part);
+    void to_json(nlohmann::json& j, const Group& part);
 
     /// A regex part specifying an optional quantifier (`(expression)?`).
     struct Optional {
@@ -116,7 +116,7 @@ namespace part {
         /// The smart pointer to the subexpression under the quantifier.
         utils::Box<SpannedPart> inner;
     };
-    // void to_json(nlohmann::json& j, const Optional& part);
+    void to_json(nlohmann::json& j, const Optional& part);
 
     /// A regex part specifying an "at least one" quantifier (`(expression)+`).
     struct Plus {
@@ -128,7 +128,7 @@ namespace part {
         /// The smart pointer to the subexpression under the quantifier.
         utils::Box<SpannedPart> inner;
     };
-    // void to_json(nlohmann::json& j, const Plus& part);
+    void to_json(nlohmann::json& j, const Plus& part);
 
     /// A regex part specifying an "at least zero" quantifier (`(expression)*`).
     struct Star {
@@ -140,7 +140,7 @@ namespace part {
         /// The smart pointer to the subexpression under the quantifier.
         utils::Box<SpannedPart> inner;
     };
-    // void to_json(nlohmann::json& j, const Star& part);
+    void to_json(nlohmann::json& j, const Star& part);
 
     /// A regex part specifying any single character (`.`).
     struct Wildcard {
@@ -148,7 +148,7 @@ namespace part {
         bool operator==(const Wildcard& rhs) const = default;
         static constexpr const char* code_name = "wildcard";
     };
-    // void to_json(nlohmann::json& j, const Wildcard& part);
+    void to_json(nlohmann::json& j, const Wildcard& part);
 
     /// A regex part specifying a character class (e.g. `[a-z_]`).
     struct CharacterClass {
@@ -159,7 +159,7 @@ namespace part {
         /// The list of character ranges.
         CharacterClassData data;
     };
-    // void to_json(nlohmann::json& j, const CharacterClass& part);
+    void to_json(nlohmann::json& j, const CharacterClass& part);
 
     using Adt = utils::
         Adt<Empty, Literal, Alternatives, Sequence, Group, Optional, Plus, Star, Wildcard, CharacterClass>;
@@ -195,7 +195,7 @@ class Part : public part::Adt {
 public:
     using part::Adt::Adt;
 };
-// void to_json(nlohmann::json& j, const Part& part);
+void to_json(nlohmann::json& j, const Part& part);
 
 /// A version of `Part` including the span information (position in the input) of the root AST node
 /// (child nodes always contain it because they are represented as `SpannedPart`s themselves).
@@ -218,7 +218,7 @@ private:
     Part m_part;
     span::Span m_span;
 };
-// void to_json(nlohmann::json& j, const SpannedPart& part);
+void to_json(nlohmann::json& j, const SpannedPart& part);
 
 /// Convert a `SpannedPart` to a textual representation and write it to an `std::ostream`.
 std::ostream& operator<<(std::ostream& out, const SpannedPart& part);
